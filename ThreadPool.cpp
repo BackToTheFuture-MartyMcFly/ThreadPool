@@ -28,25 +28,6 @@ bool ThreadPool::isStopped() const {
 	return stopFlag.load();
 }
 
-template<typename F, typename... Args>
-auto ThreadPool::enqueue(F&& f, Args&& ... args) -> std::future<decltype(f(args...))> {
-	using ReturnType = decltype(f(args...));
-
-	if (isStopped())
-		throw std::runtime_error("Thread pool is stopped");
-
-	auto task = std::make_shared<std::packaged_task<ReturnType>>(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-	std::future<ReturnType> future = task->get_future();
-
-	{
-		std::lock_guard<std::mutex> lock(queueMutex);
-		tasks.emplace([task]() { (*task)(); });
-	}
-	cv.notify_one();
-
-	return future;
-}
-
 void ThreadPool::worker(std::stop_token st) {
 	while (!st.stop_requested()) {
 		std::unique_lock lock(queueMutex);
@@ -62,5 +43,16 @@ void ThreadPool::worker(std::stop_token st) {
 		lock.unlock();
 
 		task();
+
+		if (--activeTasks == 0)
+			allDoneCv.notify_one();
+		
 	}
+}
+
+void ThreadPool::waitForAll() {
+	std::unique_lock lock(queueMutex);
+	allDoneCv.wait(lock, [this] {
+		return activeTasks == 0 && tasks.empty();
+		});
 }
